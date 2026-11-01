@@ -11,7 +11,7 @@ import GunCard from '../components/gun/GunCard'
  */
 export default function FavoritesPage({ onSelectGun, onNavigateCatalog }) {
   const { favorites, loading: favLoading, error: favError, refetch } = useFavorites()
-  const { guns: apiGuns } = useGuns({ limit: 100 })
+  const { guns: apiGuns } = useGuns({ limit: 1000 })
 
   // All known guns catalog for fallback item lookup
   const allKnownGuns = useMemo(() => {

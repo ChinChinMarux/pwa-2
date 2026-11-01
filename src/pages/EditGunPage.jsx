@@ -8,6 +8,8 @@ import {
   Save,
   CheckCircle,
   AlertCircle,
+  Star,
+  Images,
 } from 'lucide-react'
 import gunService from '../services/gunService'
 import uploadService from '../services/uploadService'
@@ -19,11 +21,19 @@ import {
   getDraftTimestamp,
   formatDraftTime,
 } from '../utils/draftStorage'
+import {
+  MAX_GALLERY_IMAGES,
+  normalizeGallery,
+  getSavedGallery,
+} from '../utils/imageStore'
+import { resolveGunImages } from '../utils/helpers'
 import ConfirmModal from '../components/modals/ConfirmModal'
 
+const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+
 /**
- * EditGunPage — Edit an existing weapon / hardware item.
- * Supports updating specs, steps, image replacement, and draft management.
+ * EditGunPage — edit an existing hardware item, including its image gallery.
+ * Supports updating specs, steps, cover image, and draft management.
  */
 export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
   const targetId = gunId || gun?.id
@@ -45,9 +55,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
     is_featured: false,
   })
 
-  const [currentImageUrl, setCurrentImageUrl] = useState('')
-  const [imageFile, setImageFile] = useState(null)
-  const [imagePreview, setImagePreview] = useState(null)
+  const [gallery, setGallery] = useState([])
   const [uploading, setUploading] = useState(false)
 
   // Specs & Steps
@@ -88,7 +96,13 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             servings: data.servings || 1,
             is_featured: Boolean(data.is_featured),
           })
-          setCurrentImageUrl(data.image_url || data.image || '/guns/pistol.svg')
+
+          const localGallery = getSavedGallery(targetId)
+          setGallery(
+            localGallery.length > 0
+              ? localGallery
+              : resolveGunImages(data),
+          )
 
           if (data.ingredients && data.ingredients.length > 0) {
             setSpecs(data.ingredients.map((ing) => ({
@@ -103,11 +117,10 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
           }
 
           if (data.steps && data.steps.length > 0) {
-            setSteps(data.steps.map((st) => (typeof st === 'string' ? st : st.instruction || '')))
+            setSteps(data.steps.map((step) => (typeof step === 'string' ? step : step.instruction || '')))
           } else {
             setSteps(['Standard manufacturer maintenance and cleaning protocol.'])
           }
-
         } else {
           setError('Hardware record could not be loaded.')
         }
@@ -131,8 +144,10 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       if (draft.formData) setFormData(draft.formData)
       if (draft.specs) setSpecs(draft.specs)
       if (draft.steps) setSteps(draft.steps)
-      if (draft.imagePreview) {
-        setImagePreview(draft.imagePreview)
+      if (Array.isArray(draft.gallery) && draft.gallery.length > 0) {
+        setGallery(normalizeGallery(draft.gallery))
+      } else if (draft.imagePreview) {
+        setGallery([draft.imagePreview])
       }
       setShowDraftModal(false)
       setSuccessMsg('Saved draft restored.')
@@ -151,92 +166,111 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       formData,
       specs,
       steps,
-      imagePreview: imagePreview || currentImageUrl,
+      gallery,
     }
     const saved = saveDraft(draftData, targetId)
     if (saved) {
-      const ts = getDraftTimestamp(targetId)
-      setDraftTimestamp(ts)
-      setSuccessMsg(`Draft saved (${formatDraftTime(ts)})`)
+      const timestamp = getDraftTimestamp(targetId)
+      setDraftTimestamp(timestamp)
+      setSuccessMsg(`Draft saved (${formatDraftTime(timestamp)})`)
       setTimeout(() => setSuccessMsg(''), 3000)
     }
   }
 
-  // Handle new image file
-  const handleImageChange = (e) => {
-    const file = e.target.files[0]
-    if (!file) return
+  // ---------------------------------------------------------------------
+  // Gallery handlers
+  // ---------------------------------------------------------------------
+  const handleAddImages = async (event) => {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    if (files.length === 0) return
 
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File size exceeds 5MB limit.')
+    const remaining = MAX_GALLERY_IMAGES - gallery.length
+    if (remaining <= 0) {
+      setError(`Maximum ${MAX_GALLERY_IMAGES} images per product.`)
       return
     }
 
-    const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
-    if (!allowed.includes(file.type)) {
-      setError('Allowed formats: .jpg, .jpeg, .png, .webp')
-      return
+    const accepted = []
+    for (const file of files.slice(0, remaining)) {
+      if (file.size > 5 * 1024 * 1024) {
+        setError(`${file.name}: file size exceeds 5MB limit.`)
+        continue
+      }
+      if (!ALLOWED_TYPES.includes(file.type)) {
+        setError(`${file.name}: allowed formats are .jpg, .jpeg, .png, .webp`)
+        continue
+      }
+      accepted.push(file)
     }
 
-    setImageFile(file)
-    setImagePreview(URL.createObjectURL(file))
-    setError('')
-  }
+    if (accepted.length === 0) return
 
-  const handleUploadNewImage = async () => {
-    if (!imageFile) return
     try {
       setUploading(true)
-      const res = await uploadService.uploadImage(imageFile)
-      if (res.success && res.data?.url) {
-        setCurrentImageUrl(res.data.url)
-        setImageFile(null)
-        setImagePreview(null)
-        setSuccessMsg('New image uploaded successfully.')
-        setTimeout(() => setSuccessMsg(''), 3000)
+      setError('')
+      const uploaded = []
+      for (const file of accepted) {
+        try {
+          const result = await uploadService.uploadImage(file)
+          uploaded.push(result?.data?.url || URL.createObjectURL(file))
+        } catch {
+          uploaded.push(URL.createObjectURL(file))
+        }
       }
-    } catch (err) {
-      console.warn('Image upload failed, using local blob:', err)
-      setCurrentImageUrl(imagePreview)
-      setImageFile(null)
-      setImagePreview(null)
+      setGallery((previous) => normalizeGallery([...previous, ...uploaded]))
+      setSuccessMsg(`${uploaded.length} image(s) added. Save changes to persist.`)
+      setTimeout(() => setSuccessMsg(''), 3000)
     } finally {
       setUploading(false)
     }
   }
 
+  const removeGalleryImage = (index) => {
+    setGallery((previous) => previous.filter((_, position) => position !== index))
+  }
+
+  const makePrimary = (index) => {
+    setGallery((previous) => {
+      if (index <= 0 || index >= previous.length) return previous
+      const copy = [...previous]
+      const [picked] = copy.splice(index, 1)
+      return [picked, ...copy]
+    })
+  }
+
   // Specs & Steps
   const handleSpecChange = (index, field, value) => {
-    setSpecs((prev) => {
-      const copy = [...prev]
+    setSpecs((previous) => {
+      const copy = [...previous]
       copy[index] = { ...copy[index], [field]: value }
       return copy
     })
   }
 
-  const addSpec = () => setSpecs((prev) => [...prev, { name: '', quantity: '' }])
+  const addSpec = () => setSpecs((previous) => [...previous, { name: '', quantity: '' }])
   const removeSpec = (index) => {
     if (specs.length <= 1) return
-    setSpecs((prev) => prev.filter((_, i) => i !== index))
+    setSpecs((previous) => previous.filter((_, position) => position !== index))
   }
 
   const handleStepChange = (index, value) => {
-    setSteps((prev) => {
-      const copy = [...prev]
+    setSteps((previous) => {
+      const copy = [...previous]
       copy[index] = value
       return copy
     })
   }
 
-  const addStep = () => setSteps((prev) => [...prev, ''])
+  const addStep = () => setSteps((previous) => [...previous, ''])
   const removeStep = (index) => {
     if (steps.length <= 1) return
-    setSteps((prev) => prev.filter((_, i) => i !== index))
+    setSteps((previous) => previous.filter((_, position) => position !== index))
   }
 
   // Submit update
-  const handleSubmit = async (e) => {
-    e.preventDefault()
+  const handleSubmit = async (event) => {
+    event.preventDefault()
     setError('')
 
     if (!formData.name.trim() || formData.name.trim().length < 3) {
@@ -245,10 +279,10 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
     }
 
     const cleanSpecs = specs
-      .filter((s) => s.name.trim())
-      .map((s) => ({
-        name: s.name.trim(),
-        quantity: s.quantity.trim() || 'Standard',
+      .filter((spec) => spec.name.trim())
+      .map((spec) => ({
+        name: spec.name.trim(),
+        quantity: spec.quantity.trim() || 'Standard',
       }))
 
     if (cleanSpecs.length === 0) {
@@ -257,13 +291,15 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
     }
 
     const cleanSteps = steps
-      .filter((s) => s.trim())
-      .map((s) => s.trim())
+      .filter((step) => step.trim())
+      .map((step) => step.trim())
 
     if (cleanSteps.length === 0) {
       setError('Please provide at least one maintenance step.')
       return
     }
+
+    const images = gallery.length > 0 ? gallery : ['/guns/pistol.svg']
 
     const payload = {
       name: formData.name.trim(),
@@ -272,7 +308,8 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       price: Number(formData.price) || 500,
       category: formData.category || 'makanan',
       description: formData.description.trim() || `${formData.type} caliber ${formData.caliber}.`,
-      image_url: imagePreview || currentImageUrl || '/guns/pistol.svg',
+      image_url: images[0],
+      images,
       prep_time: 15,
       cook_time: Number(formData.price) || 500,
       servings: Number(formData.servings) || 1,
@@ -347,44 +384,66 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
       )}
 
       <form onSubmit={handleSubmit} className="entry-form">
-        {/* Imagery Section */}
+        {/* Gallery Section */}
         <div className="card-box">
-          <h2 className="card-box-title">Visual Asset</h2>
-          <div className="edit-img-wrap">
-            <img
-              src={imagePreview || currentImageUrl}
-              alt="Current hardware"
-              className="edit-current-img"
-            />
-            <div className="edit-img-controls">
-              <input
-                id="edit-gun-image"
-                type="file"
-                accept="image/jpeg,image/jpg,image/png,image/webp"
-                onChange={handleImageChange}
-                className="hidden-file-input"
-              />
-              <label htmlFor="edit-gun-image" className="btn btn--outline btn--sm">
-                <Upload size={14} /> Select New Image File
-              </label>
+          <h2 className="card-box-title">
+            <Images size={18} /> Visual Assets
+          </h2>
+          <p className="card-box-desc">
+            {gallery.length}/{MAX_GALLERY_IMAGES} images. The cover image is shown on
+            the catalog card; use the star to promote an image.
+          </p>
 
-              {imageFile && (
+          <div className="gallery-grid gallery-grid--edit">
+            {gallery.map((url, index) => (
+              <div key={`${url}-${index}`} className="gallery-tile">
+                <img src={url} alt={`Hardware image ${index + 1}`} />
+                {index === 0 ? (
+                  <span className="gallery-tile__primary">
+                    <Star size={12} /> Cover
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="gallery-tile__action"
+                    onClick={() => makePrimary(index)}
+                    title="Set as cover image"
+                    aria-label="Set as cover image"
+                  >
+                    <Star size={13} />
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="btn btn--primary btn--sm"
-                  onClick={handleUploadNewImage}
-                  disabled={uploading}
+                  className="gallery-tile__remove"
+                  onClick={() => removeGalleryImage(index)}
+                  title="Remove image"
+                  aria-label="Remove image"
                 >
-                  {uploading ? (
-                    <>
-                      <Loader size={14} className="spin" /> Uploading…
-                    </>
-                  ) : (
-                    'Upload to MinIO'
-                  )}
+                  <X size={14} />
                 </button>
-              )}
-            </div>
+              </div>
+            ))}
+
+            {gallery.length < MAX_GALLERY_IMAGES && (
+              <label className="gallery-tile gallery-tile--add" htmlFor="edit-gun-images">
+                {uploading ? (
+                  <Loader size={20} className="spin" />
+                ) : (
+                  <Upload size={20} />
+                )}
+                <span>{uploading ? 'Uploading…' : 'Add images'}</span>
+                <input
+                  id="edit-gun-images"
+                  type="file"
+                  accept="image/jpeg,image/jpg,image/png,image/webp"
+                  multiple
+                  onChange={handleAddImages}
+                  className="hidden-file-input"
+                  disabled={uploading}
+                />
+              </label>
+            )}
           </div>
         </div>
 
@@ -399,7 +458,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
               type="text"
               name="name"
               value={formData.name}
-              onChange={(e) => setFormData((p) => ({ ...p, name: e.target.value }))}
+              onChange={(event) => setFormData((previous) => ({ ...previous, name: event.target.value }))}
               className="form-input"
               required
             />
@@ -413,11 +472,11 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
               id="edit-type"
               name="type"
               value={formData.type}
-              onChange={(e) =>
-                setFormData((p) => ({
-                  ...p,
-                  type: e.target.value,
-                  category: e.target.value === 'Pistol' ? 'makanan' : 'minuman',
+              onChange={(event) =>
+                setFormData((previous) => ({
+                  ...previous,
+                  type: event.target.value,
+                  category: event.target.value === 'Pistol' ? 'makanan' : 'minuman',
                 }))
               }
               className="form-select"
@@ -440,7 +499,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
               type="text"
               name="caliber"
               value={formData.caliber}
-              onChange={(e) => setFormData((p) => ({ ...p, caliber: e.target.value }))}
+              onChange={(event) => setFormData((previous) => ({ ...previous, caliber: event.target.value }))}
               className="form-input"
               required
             />
@@ -455,7 +514,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
               type="number"
               name="price"
               value={formData.price}
-              onChange={(e) => setFormData((p) => ({ ...p, price: e.target.value }))}
+              onChange={(event) => setFormData((previous) => ({ ...previous, price: event.target.value }))}
               className="form-input"
               min="0"
               required
@@ -470,7 +529,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
               id="edit-difficulty"
               name="difficulty"
               value={formData.difficulty}
-              onChange={(e) => setFormData((p) => ({ ...p, difficulty: e.target.value }))}
+              onChange={(event) => setFormData((previous) => ({ ...previous, difficulty: event.target.value }))}
               className="form-select"
             >
               <option value="mudah">Commercial / Standard</option>
@@ -488,7 +547,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             id="edit-desc"
             name="description"
             value={formData.description}
-            onChange={(e) => setFormData((p) => ({ ...p, description: e.target.value }))}
+            onChange={(event) => setFormData((previous) => ({ ...previous, description: event.target.value }))}
             rows={3}
             className="form-textarea"
           />
@@ -503,26 +562,26 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             </button>
           </div>
           <div className="multi-rows">
-            {specs.map((spec, i) => (
-              <div key={i} className="multi-row">
+            {specs.map((spec, index) => (
+              <div key={index} className="multi-row">
                 <input
                   type="text"
                   placeholder="Attribute"
                   value={spec.name}
-                  onChange={(e) => handleSpecChange(i, 'name', e.target.value)}
+                  onChange={(event) => handleSpecChange(index, 'name', event.target.value)}
                   className="form-input"
                 />
                 <input
                   type="text"
                   placeholder="Value"
                   value={spec.quantity}
-                  onChange={(e) => handleSpecChange(i, 'quantity', e.target.value)}
+                  onChange={(event) => handleSpecChange(index, 'quantity', event.target.value)}
                   className="form-input"
                 />
                 <button
                   type="button"
                   className="btn btn--danger-ghost"
-                  onClick={() => removeSpec(i)}
+                  onClick={() => removeSpec(index)}
                   disabled={specs.length <= 1}
                 >
                   <X size={16} />
@@ -541,19 +600,19 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             </button>
           </div>
           <div className="multi-rows">
-            {steps.map((st, i) => (
-              <div key={i} className="step-row">
-                <span className="step-num">{i + 1}</span>
+            {steps.map((step, index) => (
+              <div key={index} className="step-row">
+                <span className="step-num">{index + 1}</span>
                 <input
                   type="text"
-                  value={st}
-                  onChange={(e) => handleStepChange(i, e.target.value)}
+                  value={step}
+                  onChange={(event) => handleStepChange(index, event.target.value)}
                   className="form-input"
                 />
                 <button
                   type="button"
                   className="btn btn--danger-ghost"
-                  onClick={() => removeStep(i)}
+                  onClick={() => removeStep(index)}
                   disabled={steps.length <= 1}
                 >
                   <X size={16} />
@@ -570,7 +629,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
             type="checkbox"
             name="is_featured"
             checked={formData.is_featured}
-            onChange={(e) => setFormData((p) => ({ ...p, is_featured: e.target.checked }))}
+            onChange={(event) => setFormData((previous) => ({ ...previous, is_featured: event.target.checked }))}
             className="form-checkbox"
           />
           <label htmlFor="edit-is-featured" className="checkbox-label">
@@ -583,7 +642,7 @@ export default function EditGunPage({ gun, gunId, onBack, onSuccess }) {
           <button type="button" className="btn btn--outline" onClick={onBack} disabled={updating}>
             Cancel
           </button>
-          <button type="submit" className="btn btn--primary" disabled={updating}>
+          <button type="submit" className="btn btn--primary" disabled={updating || uploading}>
             {updating ? (
               <>
                 <Loader size={18} className="spin" /> Updating Record…

@@ -114,3 +114,35 @@ export const getAllDraftIds = () => {
 export const clearAllDrafts = () => {
   getAllDraftIds().forEach(deleteDraft)
 }
+
+/**
+ * List every saved draft with display metadata for the Drafts page.
+ * Each entry: { id, savedAt, timestamp, name, type, price, image, stepCount }
+ */
+export const listDrafts = () => {
+  return getAllDraftIds()
+    .map((id) => {
+      const draft = loadDraft(id)
+      const timestamp = getDraftTimestamp(id) || draft?.savedAt || null
+      const formData = draft?.formData || {}
+      const gallery = Array.isArray(draft?.gallery) ? draft.gallery : []
+      return {
+        id,
+        kind: id === 'create' ? 'create' : 'edit',
+        savedAt: timestamp,
+        timestamp,
+        name:
+          formData.name ||
+          (id === 'create' ? 'Untitled registration' : `Hardware ${id}`),
+        type: formData.type || 'Hardware',
+        price: Number(formData.price ?? 0),
+        image: gallery[0] || draft?.uploadedImageUrl || draft?.imagePreview || '',
+        stepCount: Array.isArray(draft?.steps) ? draft.steps.length : 0,
+      }
+    })
+    .filter((draft) => draft.savedAt || draft.name)
+    .sort(
+      (a, b) =>
+        new Date(b.savedAt || 0).getTime() - new Date(a.savedAt || 0).getTime(),
+    )
+}

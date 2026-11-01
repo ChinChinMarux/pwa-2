@@ -1,12 +1,12 @@
-import { Plus } from 'lucide-react'
+import { Archive, FileText, Plus } from 'lucide-react'
 import { useFavorites } from '../hooks/useFavorites'
 
 const NAV_ITEMS = [
-  { id: 'Catalog', label: 'Catalog' },
-  { id: 'Favorites', label: 'Favorites', hasBadge: true },
-  { id: 'Profile', label: 'Profile' },
-  { id: 'About', label: 'About' },
-  { id: 'Contact', label: 'Contact' },
+  { id: 'catalog', label: 'Catalog' },
+  { id: 'favorites', label: 'Favorites', hasBadge: true },
+  { id: 'drafts', label: 'Drafts' },
+  { id: 'archived', label: 'Archived' },
+  { id: 'profile', label: 'Profile' },
 ]
 
 function Header({ tab, onTab, onNavigateCreate }) {
@@ -15,7 +15,11 @@ function Header({ tab, onTab, onNavigateCreate }) {
 
   return (
     <header className="header">
-      <div className="header-brand-wrap" onClick={() => onTab('Catalog')} style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '10px' }}>
+      <div
+        className="header-brand-wrap"
+        onClick={() => onTab('catalog')}
+        style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '10px' }}
+      >
         <div className="header-logo-badge">
           <img src="/logo.png" alt="Bore & Barrel" />
         </div>
@@ -30,6 +34,8 @@ function Header({ tab, onTab, onNavigateCreate }) {
             className={tab === item.id ? 'nav-link active' : 'nav-link'}
             onClick={() => onTab(item.id)}
           >
+            {item.id === 'drafts' && <FileText size={14} />}
+            {item.id === 'archived' && <Archive size={14} />}
             {item.label}
             {item.hasBadge && favCount > 0 && (
               <span className="nav-badge">{favCount}</span>

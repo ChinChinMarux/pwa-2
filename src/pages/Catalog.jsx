@@ -1,12 +1,19 @@
-import { useState, useMemo } from 'react'
-import { RefreshCw, Plus, Loader, AlertCircle, PackageOpen } from 'lucide-react'
+import { useMemo, useState } from 'react'
+import {
+  RefreshCw,
+  Plus,
+  Loader,
+  AlertCircle,
+  PackageOpen,
+  Database,
+} from 'lucide-react'
 import { useGuns } from '../hooks/useGuns'
 import GUNS_LOCAL from '../data/guns'
 import GunCard from '../components/gun/GunCard'
-import GunDetail from '../components/gun/GunDetail'
 import AdvancedFilter from '../components/common/AdvancedFilter'
+import Pagination from '../components/common/Pagination'
 import ConfirmModal from '../components/modals/ConfirmModal'
-import gunService from '../services/gunService'
+import archiveService from '../services/archiveService'
 import {
   matchesSearch,
   matchesCategory,
@@ -14,25 +21,39 @@ import {
   extractCategories,
 } from '../utils/helpers'
 
+const PAGE_SIZE_OPTIONS = [6, 12, 24, 48]
+
 /**
  * Catalog page — the main product listing.
  *
  * Data source priority:
- *   1. Live API via useGuns()
+ *   1. Cached / live API via useGuns()
  *   2. Local static array (GUNS_LOCAL) when the API is unreachable
  *
- * Features: search, category filter, sort, CRUD actions, detail modal.
+ * Features: search, category filter, sort, pagination, CRUD + archive, share
+ * links, lazy-loaded images.
  */
 export default function Catalog({ onNavigate }) {
-  // ---- API data ----
-  const { guns: apiGuns, loading, error, refetch } = useGuns({ limit: 50 })
+  // ---- API data (query cache + stale-while-revalidate) ----
+  const {
+    guns: apiGuns,
+    loading,
+    refreshing,
+    error,
+    cache,
+    refetch,
+  } = useGuns({ limit: 1000 })
   const [useLocal, setUseLocal] = useState(false)
 
   // Decide data source
   const rawGuns = useMemo(() => {
     if (useLocal || (error && apiGuns.length === 0)) {
       // Enrich local data with synthetic ids so FavoriteButton and detail work
-      return GUNS_LOCAL.map((g, i) => ({ ...g, id: g.id || `local-${i}` }))
+      return GUNS_LOCAL.map((gun, index) => ({
+        ...gun,
+        id: gun.id || `local-${index}`,
+        images: [gun.image],
+      }))
     }
     return apiGuns
   }, [apiGuns, error, useLocal])
@@ -46,45 +67,66 @@ export default function Catalog({ onNavigate }) {
   const categories = useMemo(() => extractCategories(rawGuns), [rawGuns])
 
   const filteredGuns = useMemo(() => {
-    let result = rawGuns.filter(
-      (g) => matchesSearch(g, search) && matchesCategory(g, activeCategory),
+    const result = rawGuns.filter(
+      (gun) => matchesSearch(gun, search) && matchesCategory(gun, activeCategory),
     )
     return sortItems(result, sortKey, sortOrder)
   }, [rawGuns, search, activeCategory, sortKey, sortOrder])
 
-  // ---- detail view ----
-  const [selectedGun, setSelectedGun] = useState(null)
+  // ---- pagination (client side, after filter + sort) ----
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0])
 
-  // ---- delete ----
-  const [deleteTarget, setDeleteTarget] = useState(null)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState('')
+  const totalPages = Math.max(1, Math.ceil(filteredGuns.length / pageSize))
+  const safePage = Math.min(page, totalPages)
+  const pageItems = useMemo(() => {
+    const start = (safePage - 1) * pageSize
+    return filteredGuns.slice(start, start + pageSize)
+  }, [filteredGuns, safePage, pageSize])
 
-  const handleDelete = async () => {
-    if (!deleteTarget) return
-    try {
-      setDeleting(true)
-      setDeleteError('')
-      await gunService.deleteGun(deleteTarget.id)
-      setDeleteTarget(null)
-      refetch()
-    } catch (err) {
-      setDeleteError(err.message || 'Failed to delete.')
-    } finally {
-      setDeleting(false)
-    }
+  // Changing a filter / sort / page size restarts at page 1.
+  const resetPage = () => setPage(1)
+
+  const handleSearch = (value) => {
+    setSearch(value)
+    resetPage()
   }
 
-  // ---- If viewing a single product detail ----
-  if (selectedGun) {
-    return (
-      <GunDetail
-        gun={selectedGun}
-        onBack={() => setSelectedGun(null)}
-        onEdit={(g) => onNavigate && onNavigate('Edit', g)}
-        onDelete={(g) => { setSelectedGun(null); setDeleteTarget(g) }}
-      />
-    )
+  const handleCategory = (value) => {
+    setActiveCategory(value)
+    resetPage()
+  }
+
+  const handleSort = ({ key, order }) => {
+    setSortKey(key)
+    setSortOrder(order)
+    resetPage()
+  }
+
+  const handlePageSize = (value) => {
+    setPageSize(value)
+    resetPage()
+  }
+
+  // ---- archive (soft delete) ----
+  const [archiveTarget, setArchiveTarget] = useState(null)
+  const [archiving, setArchiving] = useState(false)
+  const [archiveError, setArchiveError] = useState('')
+
+  const handleArchive = async () => {
+    if (!archiveTarget) return
+    try {
+      setArchiving(true)
+      setArchiveError('')
+      await archiveService.archive(archiveTarget)
+      setArchiveTarget(null)
+      setPage(1)
+      refetch()
+    } catch (err) {
+      setArchiveError(err?.message || 'Failed to archive product.')
+    } finally {
+      setArchiving(false)
+    }
   }
 
   // ---- Main catalog view ----
@@ -102,6 +144,24 @@ export default function Catalog({ onNavigate }) {
         <div className="list-head">
           <h2>Current stock</h2>
           <div className="list-head-right">
+            {cache?.hit && (
+              <span
+                className="cache-chip"
+                title={
+                  cache.stale
+                    ? 'Served stale from the query cache while the network was unavailable'
+                    : 'Served from the in-memory query cache'
+                }
+              >
+                <Database size={12} />
+                {cache.stale ? 'cached (stale)' : 'cached'}
+              </span>
+            )}
+            {refreshing && (
+              <span className="refreshing-chip">
+                <Loader size={12} className="spin" /> refreshing
+              </span>
+            )}
             <span className="count">
               {filteredGuns.length} piece{filteredGuns.length !== 1 ? 's' : ''}
             </span>
@@ -120,24 +180,24 @@ export default function Catalog({ onNavigate }) {
         {/* Filters */}
         <AdvancedFilter
           search={search}
-          onSearch={setSearch}
+          onSearch={handleSearch}
           categories={categories}
           activeCategory={activeCategory}
-          onCategory={setActiveCategory}
+          onCategory={handleCategory}
           sortKey={sortKey}
           sortOrder={sortOrder}
-          onSort={({ key, order }) => { setSortKey(key); setSortOrder(order) }}
+          onSort={handleSort}
         />
 
         {/* States */}
-        {loading && (
+        {loading && apiGuns.length === 0 && (
           <div className="state-box">
             <Loader size={28} className="spin" />
             <p>Loading products…</p>
           </div>
         )}
 
-        {!loading && error && !useLocal && (
+        {!loading && error && !useLocal && apiGuns.length === 0 && (
           <div className="state-box state-box--error">
             <AlertCircle size={28} />
             <p>{error}</p>
@@ -163,19 +223,37 @@ export default function Catalog({ onNavigate }) {
           </div>
         )}
 
-        {/* Product grid */}
-        {filteredGuns.length > 0 && (
+        {/* Product grid — one page at a time */}
+        {pageItems.length > 0 && (
           <ul className="stock">
-            {filteredGuns.map((gun) => (
+            {pageItems.map((gun) => (
               <GunCard
                 key={gun.id || gun.name}
                 gun={gun}
-                onSelect={setSelectedGun}
-                onEdit={onNavigate ? (g) => onNavigate('Edit', g) : undefined}
-                onDelete={setDeleteTarget}
+                onSelect={(selected) =>
+                  onNavigate ? onNavigate('Detail', selected) : undefined
+                }
+                onEdit={onNavigate ? (selected) => onNavigate('Edit', selected) : undefined}
+                onArchive={(selected) => {
+                  setArchiveError('')
+                  setArchiveTarget(selected)
+                }}
               />
             ))}
           </ul>
+        )}
+
+        {filteredGuns.length > 0 && (
+          <Pagination
+            page={safePage}
+            pageCount={totalPages}
+            pageSize={pageSize}
+            total={filteredGuns.length}
+            onPage={setPage}
+            onPageSize={handlePageSize}
+            pageSizeOptions={PAGE_SIZE_OPTIONS}
+            label="pieces"
+          />
         )}
 
         {useLocal && (
@@ -184,7 +262,10 @@ export default function Catalog({ onNavigate }) {
             <button
               type="button"
               className="link-btn"
-              onClick={() => { setUseLocal(false); refetch() }}
+              onClick={() => {
+                setUseLocal(false)
+                refetch()
+              }}
             >
               Retry server
             </button>
@@ -192,20 +273,20 @@ export default function Catalog({ onNavigate }) {
         )}
       </section>
 
-      {/* Delete confirmation */}
+      {/* Archive (soft delete) confirmation */}
       <ConfirmModal
-        open={!!deleteTarget}
-        title="Delete Product"
-        message={`Are you sure you want to delete "${deleteTarget?.name}"? This action cannot be undone.`}
-        confirmLabel="Delete"
-        danger
-        loading={deleting}
-        onConfirm={handleDelete}
-        onCancel={() => { setDeleteTarget(null); setDeleteError('') }}
+        open={Boolean(archiveTarget)}
+        title="Archive Hardware Record"
+        message={`Move "${archiveTarget?.name}" to the archive? It will be hidden from the catalog and can be restored later.`}
+        confirmLabel="Archive"
+        loading={archiving}
+        onConfirm={handleArchive}
+        onCancel={() => {
+          setArchiveTarget(null)
+          setArchiveError('')
+        }}
       />
-      {deleteError && (
-        <div className="toast toast--error">{deleteError}</div>
-      )}
+      {archiveError && <div className="toast toast--error">{archiveError}</div>}
     </>
   )
 }
